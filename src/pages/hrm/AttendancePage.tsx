@@ -9,6 +9,7 @@ import {
   genId,
 } from '@/hrm/store';
 import { useHrmPermission } from '@/hrm/usePermission';
+import { useTenantScope } from '@/hrm/useTenantScope';
 import { useAuth } from '@/auth/AuthContext';
 import { useMappings } from '@/store/authStore';
 import type { AttendanceLog, ApprovalRequest, Shift } from '@/hrm/types';
@@ -97,6 +98,7 @@ export default function AttendancePage() {
   const [settings] = useHrmSettings();
   const [mappings] = useMappings();
   const { getLevel, LEVEL_RANK } = useHrmPermission();
+  const { tenantEmployeeIds, isSuperAdmin } = useTenantScope();
   const attLevel = getLevel('hrm_attendance');
   const [selectedEmpId, setSelectedEmpId] = useState<string>('');
 
@@ -125,23 +127,27 @@ export default function AttendancePage() {
   const myEmpId = currentUser?.employee_id || currentUser?.id || '';
 
   // Resolve current user's linked employee: match employee.user_id === user.id,
-  // or fall back to employee.id === user.employee_id, then employee_code === username
+  // or fall back to employee.id === user.employee_id, then employee_code === username.
+  // Always restrict the candidate pool to the active hotel's employees.
   const myEmployee = useMemo(() => {
     if (!currentUser) return null;
-    return employees.find((e) => e.user_id === currentUser.id)
-      ?? (currentUser.employee_id ? employees.find((e) => e.id === currentUser.employee_id) : null)
-      ?? employees.find((e) => e.employee_code === currentUser.username)
+    const pool = isSuperAdmin ? employees : employees.filter((e) => tenantEmployeeIds.has(e.id));
+    return pool.find((e) => e.user_id === currentUser.id)
+      ?? (currentUser.employee_id ? pool.find((e) => e.id === currentUser.employee_id) : null)
+      ?? pool.find((e) => e.employee_code === currentUser.username)
       ?? null;
-  }, [employees, currentUser]);
+  }, [employees, currentUser, isSuperAdmin, tenantEmployeeIds]);
 
-  // Scope: admins see all employees; non-admins are locked to their own record only.
+  // Scope: admins see all employees in the active hotel; non-admins are
+  // locked to their own record only.
   const scopedEmployees = useMemo(() => {
     if (attLevel === 'hidden') return [];
+    const tenantPool = isSuperAdmin ? employees : employees.filter((e) => tenantEmployeeIds.has(e.id));
     if (!isAdmin) {
       return myEmployee ? [myEmployee] : [];
     }
-    return employees;
-  }, [employees, attLevel, isAdmin, myEmployee]);
+    return tenantPool;
+  }, [employees, attLevel, isAdmin, myEmployee, isSuperAdmin, tenantEmployeeIds]);
 
   // Whether the current user can clock in/out (requires at least 'update')
   const canClock = LEVEL_RANK[attLevel] >= LEVEL_RANK.update;
@@ -162,18 +168,24 @@ export default function AttendancePage() {
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // ── HARD DATA FILTERING (store & UI level) ──
+  // First enforce multi-tenant isolation: logs only belong to employees in the
+  // active hotel (super admin in all-hotels mode sees every employee).
+  const tenantLogs = useMemo(
+    () => (isSuperAdmin ? logs : logs.filter((l) => tenantEmployeeIds.has(l.employee_id))),
+    [logs, isSuperAdmin, tenantEmployeeIds]
+  );
   // Non-admins may only ever see attendance rows that belong to their own
-  // linked employee record(s). Admins see the full list.
+  // linked employee record(s). Admins see the full tenant-scoped list.
   const visibleLogs = useMemo(() => {
-    if (isAdmin) return logs;
+    if (isAdmin) return tenantLogs;
     const myEmpIds = new Set(
       employees
         .filter((e) => e.user_id === currentUser?.id || e.id === myEmpId)
         .map((e) => e.id),
     );
     if (myEmpIds.size === 0 && myEmpId) myEmpIds.add(myEmpId);
-    return logs.filter((log) => myEmpIds.has(log.employee_id));
-  }, [logs, isAdmin, myEmpId, currentUser, employees]);
+    return tenantLogs.filter((log) => myEmpIds.has(log.employee_id));
+  }, [tenantLogs, isAdmin, myEmpId, currentUser, employees]);
 
   // The effective employee id used for any clock/adjustment action.
   // Non-admins are ALWAYS bound to their own employee; admins use the selector.
@@ -196,8 +208,8 @@ export default function AttendancePage() {
   }, [isAdmin, scopedEmployees, selectedEmpId, myEmployee, myEmpId]);
 
   const emp = useMemo(
-    () => employees.find((e) => e.id === effectiveEmpId),
-    [employees, effectiveEmpId]
+    () => scopedEmployees.find((e) => e.id === effectiveEmpId),
+    [scopedEmployees, effectiveEmpId]
   );
 
   // Today's scheduled shift for this employee
@@ -373,7 +385,7 @@ export default function AttendancePage() {
     ];
     const dayLogs = visibleLogs.filter((l) => l.date === today);
     const rows = dayLogs.map((l) => {
-      const emp = employees.find((e) => e.id === l.employee_id);
+      const emp = scopedEmployees.find((e) => e.id === l.employee_id);
       const sch = shifts.find((s) => s.id === l.shift_id);
       const statusLabel = l.status === 'valid' ? 'Đúng ca' : l.status === 'pending_approval' ? 'Chờ duyệt' : 'Từ chối';
       return [
