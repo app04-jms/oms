@@ -8,6 +8,7 @@ import { useRouter } from '@/router/RouterContext';
 import { localDateStr } from '@/hrm/dateUtils';
 import { useAuth } from '@/auth/AuthContext';
 import { useHrmPermission } from '@/hrm/usePermission';
+import { useTenantScope } from '@/hrm/useTenantScope';
 import { exportToXlsx, downloadTemplate, parseXlsx, type SheetColumn } from '@/utils/xlsx';
 import { generateUniqueId } from '@/utils/idGenerator';
 
@@ -53,7 +54,7 @@ export default function EmployeesPage() {
   const { navigate } = useRouter();
   const { getLevel, LEVEL_RANK } = useHrmPermission();
   const empLevel = getLevel('hrm_profiles');
-  const activeHotelId = session?.activeHotelId ?? 'htl_01';
+  const { hotelId: activeHotelId, isSuperAdmin } = useTenantScope();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [importMsg, setImportMsg] = useState('');
   const [activeTab, setActiveTab] = useState('all');
@@ -88,6 +89,11 @@ export default function EmployeesPage() {
 
   const filtered = useMemo(() => {
     let list = employees;
+    if (!isSuperAdmin && activeHotelId) {
+      list = list.filter((e) => e.hotel_id === activeHotelId);
+    } else if (!isSuperAdmin && !activeHotelId) {
+      return [];
+    }
     // Scope: 'view' level shows only the current user's linked employee record;
     // 'view_all' and above shows all employees.
     if (empLevel === 'hidden') return [];
@@ -110,8 +116,7 @@ export default function EmployeesPage() {
       );
     }
     return list;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employees, activeTab, filterDept, filterStatus, search, departments, statuses, empLevel, myEmployee, user]);
+  }, [employees, activeTab, filterDept, filterStatus, search, departments, statuses, empLevel, myEmployee, user, isSuperAdmin, activeHotelId]);
 
   const blankEmployee = (): Employee => ({
     id: genId('e_'),
@@ -126,29 +131,31 @@ export default function EmployeesPage() {
     has_leave: true,
     opening_leave_balance: 12,
     user_id: null,
+    hotel_id: activeHotelId ?? undefined,
   });
 
   const handleSave = (emp: Employee) => {
+    const withTenant: Employee = { ...emp, hotel_id: emp.hotel_id || activeHotelId || undefined };
     setEmployees((prev) => {
-      const exists = prev.some((e) => e.id === emp.id);
-      return exists ? prev.map((e) => (e.id === emp.id ? emp : e)) : [...prev, emp];
+      const exists = prev.some((e) => e.id === withTenant.id);
+      return exists ? prev.map((e) => (e.id === withTenant.id ? withTenant : e)) : [...prev, withTenant];
     });
     setShowForm(false);
     setEditing(null);
     // For newly-created employees, prompt to create a login account
-    const wasNew = !employees.some((e) => e.id === emp.id);
+    const wasNew = !employees.some((e) => e.id === withTenant.id);
     if (wasNew) {
       setAccountPassword('123456');
-      setAccountPrompt({ employee: emp });
+      setAccountPrompt({ employee: withTenant });
     }
   };
 
   const confirmCreateAccount = () => {
     if (!accountPrompt) return;
     const emp = accountPrompt.employee;
-    const created = createUserFromEmployee(emp, accountPassword || '123456', activeHotelId, {
+    const created = createUserFromEmployee(emp, accountPassword || '123456', activeHotelId ?? null, {
       is_super_admin: user?.is_super_admin ?? false,
-      activeHotelId,
+      activeHotelId: activeHotelId ?? null,
     });
     setAccountPrompt(null);
     if (created) {
@@ -178,7 +185,7 @@ export default function EmployeesPage() {
   };
 
   const handleExport = () => {
-    const rows = employees.map((e) => ({
+    const rows = filtered.map((e) => ({
       ...e,
       department_id: deptName(e.department_id),
       status_id: statusName(e.status_id),
@@ -212,7 +219,7 @@ export default function EmployeesPage() {
             has_leave: !!row.has_leave,
             opening_leave_balance: Number(row.opening_leave_balance) || 0,
             user_id: null,
-            hotel_id: activeHotelId,
+            hotel_id: activeHotelId ?? undefined,
             base_salary: Number(row.base_salary) || 0,
           };
           next.push(emp);
@@ -237,8 +244,8 @@ export default function EmployeesPage() {
     const created = createUsersFromEmployeeList(
       bulkPrompt.employees,
       bulkPassword || '123456',
-      activeHotelId,
-      { is_super_admin: user?.is_super_admin ?? false, activeHotelId },
+      activeHotelId ?? null,
+      { is_super_admin: user?.is_super_admin ?? false, activeHotelId: activeHotelId ?? null },
     );
     const total = bulkPrompt.employees.length;
     setBulkPrompt(null);

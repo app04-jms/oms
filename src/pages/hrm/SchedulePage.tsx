@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useSchedules, useShifts, useEmployees, useWorkStatuses, getSchedulableEmployees } from '@/hrm/store';
 import { useHrmPermission } from '@/hrm/usePermission';
+import { useTenantScope } from '@/hrm/useTenantScope';
 import type { Schedule } from '@/hrm/types';
 import { Button, Badge } from '@/components/ui';
 import { CalendarDays, Download, Upload, ChevronLeft, ChevronRight, CheckCircle2, AlertTriangle, FileSpreadsheet, Save, Pencil, Eye, X } from 'lucide-react';
@@ -63,6 +64,7 @@ export default function SchedulePage() {
   const [employees] = useEmployees();
   const [statuses] = useWorkStatuses();
   const { can } = useHrmPermission();
+  const { tenantEmployeeIds } = useTenantScope();
   const canEdit = can('hrm_schedules', 'update');
   const [weekStart, setWeekStart] = useState(() => getWeekStart(new Date()));
   const [isEditing, setIsEditing] = useState(false);
@@ -72,7 +74,10 @@ export default function SchedulePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const weekDays = useMemo(() => getWeekDays(weekStart), [weekStart]);
-  const schedulable = useMemo(() => getSchedulableEmployees(employees, statuses), [employees, statuses]);
+  const schedulable = useMemo(
+    () => getSchedulableEmployees(employees, statuses).filter((e) => tenantEmployeeIds.has(e.id)),
+    [employees, statuses, tenantEmployeeIds]
+  );
 
   const shiftMap = useMemo(() => {
     const map = new Map<string, typeof shifts[number]>();
@@ -86,12 +91,13 @@ export default function SchedulePage() {
     const weekStartStr = formatDate(weekDays[0]);
     const weekEndStr = formatDate(weekDays[6]);
     schedules.forEach((s) => {
+      if (!tenantEmployeeIds.has(s.employee_id)) return;
       if (s.work_date >= weekStartStr && s.work_date <= weekEndStr) {
         map.set(`${s.employee_id}|${s.work_date}`, s.shift_id);
       }
     });
     return map;
-  }, [schedules, weekDays]);
+  }, [schedules, weekDays, tenantEmployeeIds]);
 
   const getShift = (id: string) => shifts.find((s) => s.id === id);
   const getShiftColor = (shiftId: string | undefined) => {
