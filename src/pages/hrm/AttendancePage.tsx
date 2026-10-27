@@ -10,6 +10,7 @@ import {
 } from '@/hrm/store';
 import { useHrmPermission } from '@/hrm/usePermission';
 import { useAuth } from '@/auth/AuthContext';
+import { useMappings } from '@/store/authStore';
 import type { AttendanceLog, ApprovalRequest, Shift } from '@/hrm/types';
 import { Button, Badge, TextInput, Field, Select } from '@/components/ui';
 import {
@@ -21,6 +22,7 @@ import {
   CheckCircle2,
   CalendarClock,
   Lock,
+  UserCog,
 } from 'lucide-react';
 import ExportDropdown from '@/components/ExportDropdown';
 import { exportToPdf } from '@/utils/pdf';
@@ -83,37 +85,63 @@ function getNearestShiftByTime(clockInTime: string, shifts: Shift[]): Shift | nu
 }
 
 export default function AttendancePage() {
+  // ── TOP-LEVEL SAFE INITIALIZATION (avoid temporal dead zone) ──
+  const { user: currentUser, session } = useAuth();
+  const today = todayStr();
+
   const [logs, setLogs] = useAttendanceLogs();
   const [approvals, setApprovals] = useApprovalRequests();
   const [schedules] = useSchedules();
   const [shifts] = useShifts();
   const [employees] = useEmployees();
   const [settings] = useHrmSettings();
-  const { user } = useAuth();
+  const [mappings] = useMappings();
   const { getLevel, LEVEL_RANK } = useHrmPermission();
   const attLevel = getLevel('hrm_attendance');
   const [selectedEmpId, setSelectedEmpId] = useState<string>('');
 
+  // ── STRICT PERMISSION RESOLUTION ──
+  // Resolve the user's role within the active hotel (roles live on UserHotelAccess,
+  // not on the User record itself).
+  const userRoleForHotel = useMemo(() => {
+    if (!currentUser || !session?.activeHotelId) return null;
+    return (
+      mappings.find(
+        (m) => m.user_id === currentUser.id && m.hotel_id === session.activeHotelId,
+      )?.role ?? null
+    );
+  }, [mappings, currentUser, session]);
+
+  // Admin = can see/act on attendance for any employee.
+  // Maps the spec's conceptual 'manage'/'all' levels onto the real permission
+  // ladder: view_all and above, plus the hotel_admin role, plus super admins.
+  const isAdmin = !!(
+    currentUser?.is_super_admin ||
+    userRoleForHotel === 'hotel_admin' ||
+    LEVEL_RANK[attLevel] >= LEVEL_RANK.view_all
+  );
+
+  // The current user's linked employee id (falls back to user id when unlinked).
+  const myEmpId = currentUser?.employee_id || currentUser?.id || '';
+
   // Resolve current user's linked employee: match employee.user_id === user.id,
   // or fall back to employee.id === user.employee_id, then employee_code === username
   const myEmployee = useMemo(() => {
-    if (!user) return null;
-    return employees.find((e) => e.user_id === user.id)
-      ?? (user.employee_id ? employees.find((e) => e.id === user.employee_id) : null)
-      ?? employees.find((e) => e.employee_code === user.username)
+    if (!currentUser) return null;
+    return employees.find((e) => e.user_id === currentUser.id)
+      ?? (currentUser.employee_id ? employees.find((e) => e.id === currentUser.employee_id) : null)
+      ?? employees.find((e) => e.employee_code === currentUser.username)
       ?? null;
-  }, [employees, user]);
+  }, [employees, currentUser]);
 
-  // Scope: view/view_all see all employees (view_all = supervisor sees all, view = personal only).
-  // For 'view' level: restrict to only the current user's linked employee.
-  // For 'view_all' and above: show all employees.
+  // Scope: admins see all employees; non-admins are locked to their own record only.
   const scopedEmployees = useMemo(() => {
     if (attLevel === 'hidden') return [];
-    if (attLevel === 'view' && !user?.is_super_admin) {
+    if (!isAdmin) {
       return myEmployee ? [myEmployee] : [];
     }
     return employees;
-  }, [employees, attLevel, myEmployee, user]);
+  }, [employees, attLevel, isAdmin, myEmployee]);
 
   // Whether the current user can clock in/out (requires at least 'update')
   const canClock = LEVEL_RANK[attLevel] >= LEVEL_RANK.update;
@@ -133,30 +161,49 @@ export default function AttendancePage() {
   const [clockAction, setClockAction] = useState<'in' | 'out'>('in');
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  const today = todayStr();
+  // ── HARD DATA FILTERING (store & UI level) ──
+  // Non-admins may only ever see attendance rows that belong to their own
+  // linked employee record(s). Admins see the full list.
+  const visibleLogs = useMemo(() => {
+    if (isAdmin) return logs;
+    const myEmpIds = new Set(
+      employees
+        .filter((e) => e.user_id === currentUser?.id || e.id === myEmpId)
+        .map((e) => e.id),
+    );
+    if (myEmpIds.size === 0 && myEmpId) myEmpIds.add(myEmpId);
+    return logs.filter((log) => myEmpIds.has(log.employee_id));
+  }, [logs, isAdmin, myEmpId, currentUser, employees]);
 
-  // Auto-select: for personal-scope users, lock to their own employee record.
-  // For full-scope users, default to first available employee.
+  // The effective employee id used for any clock/adjustment action.
+  // Non-admins are ALWAYS bound to their own employee; admins use the selector.
+  const effectiveEmpId = isAdmin ? selectedEmpId : (myEmployee?.id ?? myEmpId);
+
+  // Auto-select: admins default to first available employee; non-admins are
+  // force-locked to their own employee record.
   useEffect(() => {
-    if (scopedEmployees.length === 0) return;
-    if (!scopedEmployees.some((e) => e.id === selectedEmpId)) {
-      if (attLevel === 'view' && myEmployee) {
-        setSelectedEmpId(myEmployee.id);
-      } else {
+    if (isAdmin) {
+      if (scopedEmployees.length === 0) return;
+      if (!scopedEmployees.some((e) => e.id === selectedEmpId)) {
         setSelectedEmpId(scopedEmployees[0].id);
       }
+    } else {
+      const lockedId = myEmployee?.id ?? myEmpId;
+      if (lockedId && selectedEmpId !== lockedId) {
+        setSelectedEmpId(lockedId);
+      }
     }
-  }, [scopedEmployees, selectedEmpId, attLevel, myEmployee]);
+  }, [isAdmin, scopedEmployees, selectedEmpId, myEmployee, myEmpId]);
 
   const emp = useMemo(
-    () => employees.find((e) => e.id === selectedEmpId),
-    [employees, selectedEmpId]
+    () => employees.find((e) => e.id === effectiveEmpId),
+    [employees, effectiveEmpId]
   );
 
   // Today's scheduled shift for this employee
   const todaySchedule = useMemo(
-    () => schedules.find((s) => s.employee_id === selectedEmpId && s.work_date === today),
-    [schedules, selectedEmpId, today]
+    () => schedules.find((s) => s.employee_id === effectiveEmpId && s.work_date === today),
+    [schedules, effectiveEmpId, today]
   );
 
   const scheduledShift = useMemo<Shift | null>(() => {
@@ -164,10 +211,10 @@ export default function AttendancePage() {
     return shifts.find((s) => s.id === todaySchedule.shift_id) ?? null;
   }, [todaySchedule, shifts]);
 
-  // Today's attendance log for this employee
+  // Today's attendance log for this employee (sourced from the filtered set)
   const todayLog = useMemo(
-    () => logs.find((l) => l.employee_id === selectedEmpId && l.date === today),
-    [logs, selectedEmpId, today]
+    () => visibleLogs.find((l) => l.employee_id === effectiveEmpId && l.date === today),
+    [visibleLogs, effectiveEmpId, today]
   );
 
   // GPS check
@@ -206,7 +253,9 @@ export default function AttendancePage() {
   };
 
   const handleClockIn = () => {
-    if (!selectedEmpId) return;
+    // Non-admins are always bound to their own employee.
+    const empId = isAdmin ? selectedEmpId : effectiveEmpId;
+    if (!empId) return;
     const time = nowHHmm();
     const matches = checkShiftMatch(time);
 
@@ -214,7 +263,7 @@ export default function AttendancePage() {
       // Direct valid clock-in
       const log: AttendanceLog = {
         id: genId('att_'),
-        employee_id: selectedEmpId,
+        employee_id: empId,
         date: today,
         shift_id: todaySchedule?.shift_id ?? null,
         actual_shift_id: todaySchedule?.shift_id ?? null,
@@ -227,7 +276,7 @@ export default function AttendancePage() {
         mismatch_reason: gpsStatus.inRadius === false ? 'Ngoài bán kính GPS' : '',
         admin_note: '',
       };
-      setLogs((prev) => [...prev.filter((l) => !(l.employee_id === selectedEmpId && l.date === today)), log]);
+      setLogs((prev) => [...prev.filter((l) => !(l.employee_id === empId && l.date === today)), log]);
       setToast({ ok: true, msg: 'Đã ghi nhận giờ vào ca thành công.' });
     } else {
       setClockAction('in');
@@ -253,11 +302,12 @@ export default function AttendancePage() {
   };
 
   const submitMismatch = () => {
-    if (!mismatchReason.trim() || !selectedEmpId || !adjustedShiftId) return;
+    const empId = isAdmin ? selectedEmpId : effectiveEmpId;
+    if (!mismatchReason.trim() || !empId || !adjustedShiftId) return;
     const time = nowHHmm();
     const log: AttendanceLog = {
       id: genId('att_'),
-      employee_id: selectedEmpId,
+      employee_id: empId,
       date: today,
       shift_id: todaySchedule?.shift_id ?? null,
       actual_shift_id: adjustedShiftId,
@@ -270,12 +320,12 @@ export default function AttendancePage() {
       mismatch_reason: mismatchReason.trim(),
       admin_note: '',
     };
-    setLogs((prev) => [...prev.filter((l) => !(l.employee_id === selectedEmpId && l.date === today)), log]);
+    setLogs((prev) => [...prev.filter((l) => !(l.employee_id === empId && l.date === today)), log]);
 
     const req: ApprovalRequest = {
       id: genId('apr_'),
       attendance_id: log.id,
-      employee_id: selectedEmpId,
+      employee_id: empId,
       request_type: 'shift_mismatch',
       requested_shift_id: todaySchedule?.shift_id ?? null,
       adjusted_shift_id: adjustedShiftId,
@@ -300,12 +350,6 @@ export default function AttendancePage() {
     }
   }, [toast]);
 
-  const shiftName = (id: string | null) => {
-    if (!id) return '—';
-    const s = shifts.find((x) => x.id === id);
-    return s ? `${(s.code || 'OFF')} · ${s.name}` : '—';
-  };
-
   // Today's approval request (if any) for the adjusted shift display
   const todayApproval = useMemo(
     () => approvals.find((a) => a.attendance_id === todayLog?.id),
@@ -327,8 +371,7 @@ export default function AttendancePage() {
       { label: 'Giờ ra', width: '60px' },
       { label: 'Trạng thái' },
     ];
-    const today = todayStr();
-    const dayLogs = logs.filter((l) => l.date === today);
+    const dayLogs = visibleLogs.filter((l) => l.date === today);
     const rows = dayLogs.map((l) => {
       const emp = employees.find((e) => e.id === l.employee_id);
       const sch = shifts.find((s) => s.id === l.shift_id);
@@ -377,24 +420,46 @@ export default function AttendancePage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: Employee selector + scheduled shift info */}
         <div className="lg:col-span-1 space-y-4">
-          {/* Employee selector */}
+          {/* Employee selector — admin only. Non-admins see a read-only badge. */}
           <div className="bg-card rounded-xl border border-line/30 p-5">
-            <Field label="Nhân viên chấm công">
-              <select
-                className="w-full px-3 py-2 rounded-lg border border-line/50 bg-bg-main text-ink text-sm focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-all"
-                value={selectedEmpId}
-                onChange={(e) => setSelectedEmpId(e.target.value)}
-                disabled={attLevel === 'view'}
-              >
-                {scopedEmployees.map((e) => (
-                  <option key={e.id} value={e.id}>{(e.display_name || '')} — {e.employee_code}</option>
-                ))}
-              </select>
-            </Field>
-            {emp && (
-              <div className="mt-3 space-y-1 text-xs text-info">
-                <p>Mã NV: <span className="font-mono text-ink">{emp.employee_code}</span></p>
-                <p>Chức vụ: <span className="text-ink">{emp.job_title || '—'}</span></p>
+            {isAdmin ? (
+              <>
+                <Field label="Nhân viên chấm công">
+                  <select
+                    className="w-full px-3 py-2 rounded-lg border border-line/50 bg-bg-main text-ink text-sm focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-all"
+                    value={selectedEmpId}
+                    onChange={(e) => setSelectedEmpId(e.target.value)}
+                  >
+                    {scopedEmployees.map((e) => (
+                      <option key={e.id} value={e.id}>{(e.display_name || '')} — {e.employee_code}</option>
+                    ))}
+                  </select>
+                </Field>
+                {emp && (
+                  <div className="mt-3 space-y-1 text-xs text-info">
+                    <p>Mã NV: <span className="font-mono text-ink">{emp.employee_code}</span></p>
+                    <p>Chức vụ: <span className="text-ink">{emp.job_title || '—'}</span></p>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <UserCog className="w-4 h-4 text-info" />
+                  <span className="text-xs font-medium text-info">Nhân viên chấm công</span>
+                </div>
+                <Badge color="primary">
+                  Nhân viên: {myEmployee?.display_name || currentUser?.full_name || currentUser?.username || '—'}
+                </Badge>
+                {myEmployee && (
+                  <div className="space-y-1 text-xs text-info">
+                    <p>Mã NV: <span className="font-mono text-ink">{myEmployee.employee_code}</span></p>
+                    <p>Chức vụ: <span className="text-ink">{myEmployee.job_title || '—'}</span></p>
+                  </div>
+                )}
+                <p className="text-xs text-line">
+                  Bạn chỉ có thể chấm công cho chính mình. Mọi thao tác được tự động gắn với hồ sơ của bạn.
+                </p>
               </div>
             )}
           </div>
@@ -488,7 +553,7 @@ export default function AttendancePage() {
             <div className="grid grid-cols-2 gap-4">
               <button
                 onClick={handleClockIn}
-                disabled={!selectedEmpId || !!todayLog?.clock_in}
+                disabled={!effectiveEmpId || !!todayLog?.clock_in}
                 className="flex flex-col items-center justify-center gap-2 py-6 rounded-xl border-2 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed
                   bg-primary/5 border-primary/30 hover:bg-primary/10 hover:border-primary/50"
               >
