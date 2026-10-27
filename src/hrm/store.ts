@@ -59,7 +59,7 @@ const DEFAULT_STATUSES: WorkStatus[] = [
 ];
 
 const DEFAULT_EMPLOYEES: Employee[] = [
-  { id: 'e1', employee_code: 'NV001', display_name: 'Nguyễn Văn An', full_name: 'Nguyễn Văn An', department_id: 'd1', job_title: 'Lễ tân', phone: '0901234567', start_date: '2024-01-15', status_id: 'w1', has_leave: true, opening_leave_balance: 12, user_id: null, hotel_id: 'htl_01', base_salary: 0 },
+  { id: 'e1', employee_code: 'NV001', display_name: 'Nguyễn Văn An', full_name: 'Nguyễn Văn An', department_id: 'd1', job_title: 'Lễ tân', phone: '0901234567', start_date: '2024-01-15', status_id: 'w1', has_leave: true, opening_leave_balance: 12, user_id: 'usr_seedstf', hotel_id: 'htl_01', base_salary: 0 },
   { id: 'e2', employee_code: 'NV002', display_name: 'Trần Thị Bình', full_name: 'Trần Thị Bình', department_id: 'd2', job_title: 'Nhân viên buồng phòng', phone: '0902345678', start_date: '2024-03-01', status_id: 'w1', has_leave: true, opening_leave_balance: 12, user_id: null, hotel_id: 'htl_01', base_salary: 0 },
   { id: 'e3', employee_code: 'NV003', display_name: 'Lê Minh Cường', full_name: 'Lê Minh Cường', department_id: 'd3', job_title: 'Bếp trưởng', phone: '0903456789', start_date: '2023-06-10', status_id: 'w1', has_leave: true, opening_leave_balance: 12, user_id: null, hotel_id: 'htl_01', base_salary: 0 },
   { id: 'e4', employee_code: 'NV004', display_name: 'Phạm Thị Dung', full_name: 'Phạm Thị Dung', department_id: 'd1', job_title: 'Trưởng ca lễ tân', phone: '0904567890', start_date: '2023-09-20', status_id: 'w1', has_leave: true, opening_leave_balance: 12, user_id: null, hotel_id: 'htl_01', base_salary: 0 },
@@ -129,6 +129,18 @@ const shiftsStore = new SimpleStore<Shift[]>(K_SHIFTS, DEFAULT_SHIFTS);
 const departmentsStore = new SimpleStore<Department[]>(K_DEPARTMENTS, DEFAULT_DEPARTMENTS);
 const statusesStore = new SimpleStore<WorkStatus[]>(K_STATUSES, DEFAULT_STATUSES);
 const employeesStore = new SimpleStore<Employee[]>(K_EMPLOYEES, DEFAULT_EMPLOYEES);
+
+// Backfill: ensure employee 'e1' is linked to the staff user for existing
+// localStorage caches that predate the user_id seed fix.
+(() => {
+  const current = employeesStore.get();
+  const updated = current.map((e) =>
+    e.id === 'e1' && !e.user_id ? { ...e, user_id: 'usr_seedstf' } : e
+  );
+  if (updated !== current) {
+    employeesStore.set(updated);
+  }
+})();
 const schedulesStore = new SimpleStore<Schedule[]>(K_SCHEDULES, []);
 const leaveStore = new SimpleStore<LeaveEntry[]>(K_LEAVE, []);
 const attendanceStore = new SimpleStore<AttendanceLog[]>(K_ATTENDANCE, []);
