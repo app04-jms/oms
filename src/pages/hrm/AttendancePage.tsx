@@ -123,9 +123,6 @@ export default function AttendancePage() {
     LEVEL_RANK[attLevel] >= LEVEL_RANK.view_all
   );
 
-  // The current user's linked employee id (falls back to user id when unlinked).
-  const myEmpId = currentUser?.employee_id || currentUser?.id || '';
-
   // Resolve current user's linked employee: match employee.user_id === user.id,
   // or fall back to employee.id === user.employee_id, then employee_code === username.
   // Always restrict the candidate pool to the active hotel's employees.
@@ -178,18 +175,14 @@ export default function AttendancePage() {
   // linked employee record(s). Admins see the full tenant-scoped list.
   const visibleLogs = useMemo(() => {
     if (isAdmin) return tenantLogs;
-    const myEmpIds = new Set(
-      employees
-        .filter((e) => e.user_id === currentUser?.id || e.id === myEmpId)
-        .map((e) => e.id),
-    );
-    if (myEmpIds.size === 0 && myEmpId) myEmpIds.add(myEmpId);
-    return tenantLogs.filter((log) => myEmpIds.has(log.employee_id));
-  }, [tenantLogs, isAdmin, myEmpId, currentUser, employees]);
+    if (!myEmployee) return [];
+    return tenantLogs.filter((log) => log.employee_id === myEmployee.id);
+  }, [tenantLogs, isAdmin, myEmployee]);
 
   // The effective employee id used for any clock/adjustment action.
-  // Non-admins are ALWAYS bound to their own employee; admins use the selector.
-  const effectiveEmpId = isAdmin ? selectedEmpId : (myEmployee?.id ?? myEmpId);
+  // Non-admins are ALWAYS bound to their own linked employee record;
+  // if no link exists, the action is disabled (empty string).
+  const effectiveEmpId = isAdmin ? selectedEmpId : (myEmployee?.id ?? '');
 
   // Auto-select: admins default to first available employee; non-admins are
   // force-locked to their own employee record.
@@ -200,12 +193,12 @@ export default function AttendancePage() {
         setSelectedEmpId(scopedEmployees[0].id);
       }
     } else {
-      const lockedId = myEmployee?.id ?? myEmpId;
+      const lockedId = myEmployee?.id ?? '';
       if (lockedId && selectedEmpId !== lockedId) {
         setSelectedEmpId(lockedId);
       }
     }
-  }, [isAdmin, scopedEmployees, selectedEmpId, myEmployee, myEmpId]);
+  }, [isAdmin, scopedEmployees, selectedEmpId, myEmployee]);
 
   const emp = useMemo(
     () => scopedEmployees.find((e) => e.id === effectiveEmpId),
